@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 
-public class FtpService
+public class NaturalFTP
 {
     public class FtpException : Exception { public FtpException(string msg) : base(msg) { } }
     public bool PassiveMode { get; set; } = true;
