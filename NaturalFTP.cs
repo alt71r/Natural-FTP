@@ -1,22 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows;
-using System.Windows.Threading;
 
 public class NaturalFTP
 {
     public class FtpException : Exception { public FtpException(string msg) : base(msg) { } }
     public bool PassiveMode { get; set; } = true;
     public bool Connected { get; private set; } = false;
+    public int KeepAliveMS { get; set; } = 5000;
 
     Socket? sock;
     Socket? data_sock;
@@ -24,7 +17,8 @@ public class NaturalFTP
     CancellationTokenSource cancel = new CancellationTokenSource();
     public void Cancel() => cancel?.Cancel();
 
-    DispatcherTimer timer;
+    Timer? timer;
+
     public async Task Open(IPEndPoint ep, string uname, string passw)
     {
         if (Connected)
@@ -36,13 +30,11 @@ public class NaturalFTP
             passw = "anonymous@gmail.com";
         }
 
-        timer = new DispatcherTimer();
-        timer.Interval = TimeSpan.FromSeconds(5);
-        timer.Tick += Timer_Tick;
-
+        timer = new Timer(Timer_Tick);        
         cancel = new CancellationTokenSource();
 
         sock = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
         await sock.ConnectAsync(ep, cancel.Token).AsTask()
             .WaitAsync(TimeSpan.FromSeconds(5), cancel.Token);
 
@@ -63,7 +55,7 @@ public class NaturalFTP
             res = await recvCode();
             if (res.code != 200) throw new FtpException(res.msg);
 
-            timer.Start();
+            timer.Change(KeepAliveMS, -1);
         }
         catch (Exception)
         {
@@ -73,11 +65,11 @@ public class NaturalFTP
         }
     }
 
-    async void Timer_Tick(object? sender, EventArgs e)
+    async void Timer_Tick(object? sender)
     {
         if (!Connected)
         {
-            timer.Stop();
+            timer?.Change(-1, -1);
             return;
         }
 
@@ -91,7 +83,8 @@ public class NaturalFTP
 
     public async Task Close()
     {
-        timer?.Stop();
+        timer?.Change(-1,-1);
+
         if (!Connected)
             return;
 
@@ -107,11 +100,11 @@ public class NaturalFTP
     public async Task<string> Pwd()
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         cancel = new CancellationTokenSource();
         await sendCmd("PWD");
         var res = await recvCode();
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (res.code != 257)
             throw new FtpException(res.msg);
         var match = Regex.Match(res.msg, "^\"([^\"]+)\"");
@@ -122,11 +115,11 @@ public class NaturalFTP
     public async Task Cwd(string path)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         cancel = new CancellationTokenSource();
         await sendCmd("CWD " + path);
         var ln = await recvCode();
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (ln.code == 250) return;
         if (ln.code == 550) throw new FtpException("invalid dir");
         throw new FtpException("invalid reply");
@@ -134,7 +127,7 @@ public class NaturalFTP
     public async IAsyncEnumerable<string> ListFiles()
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         cancel = new CancellationTokenSource();
         await establish_data_conn();
 
@@ -142,7 +135,7 @@ public class NaturalFTP
         var res = await recvCode();
         if (res.code != 150)
         {
-            timer.Start();
+            timer?.Change(KeepAliveMS, -1);
             throw new FtpException("invalid reply");
         }
 
@@ -182,13 +175,13 @@ public class NaturalFTP
 
         res = await recvCode();
 
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (res.code != 226) throw new FtpException("invalid reply");
     }
     public async Task Download(string remotefile, int bufsize, Action<byte[]> progress)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         cancel = new CancellationTokenSource();
 
         await establish_data_conn();
@@ -197,7 +190,7 @@ public class NaturalFTP
         var res = await recvCode();
         if (res.code != 150)
         {
-            timer.Start();
+            timer?.Change(KeepAliveMS, -1);
             throw new FtpException("invalid reply");
         }
 
@@ -229,14 +222,14 @@ public class NaturalFTP
             }
             finally
             {
-                timer.Start();
+                timer?.Change(KeepAliveMS, -1);
             }
         }
     }
     public async Task Upload(string remotefile, int bufsize, Func<long, int, byte[]> getdata)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         cancel = new CancellationTokenSource();
 
         long sz = 0;
@@ -247,7 +240,7 @@ public class NaturalFTP
         var res = await recvCode();
         if (res.code != 150)
         {
-            timer.Start();
+            timer?.Change(KeepAliveMS, -1);
             throw new FtpException("invalid reply");
         }
 
@@ -285,17 +278,17 @@ public class NaturalFTP
             }
             finally
             {
-                timer.Start();
+                timer?.Change(KeepAliveMS, -1);
             }
         }
     }
     public async Task<long> GetSize(string remotefile)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         await sendCmd("SIZE " + remotefile);
         var res = await recvCode();
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (res.code == 550) throw new FtpException("does not exist");
         if (res.code != 213) throw new FtpException("invalid reply");
         var match = Regex.Match(res.msg, @"^(\d+)$");
@@ -307,10 +300,10 @@ public class NaturalFTP
     public async Task MakeDir(string dir)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         await sendCmd("MKD " + dir);
         var res = await recvCode();
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (res.code == 550 && res.msg.ToLower().Contains("exist")) return;
         if (res.code != 257) throw new FtpException("invalid reply");
     }
@@ -318,30 +311,30 @@ public class NaturalFTP
     public async Task DelDir(string dir)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         await sendCmd("RMD " + dir);
         var res = await recvCode();
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (res.code != 250) throw new FtpException("invalid reply");
     }
 
     public async Task DelFile(string dir)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         await sendCmd("DELE " + dir);
         var res = await recvCode();
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (res.code != 250) throw new FtpException("invalid reply");
     }
 
     public async Task<long> FileSize(string fname)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         await sendCmd("SIZE " + fname);
         var res = await recvCode();
-        timer.Start();
+        timer?.Change(KeepAliveMS, -1);
         if (res.code != 213) throw new FtpException("invalid reply");
         return long.Parse(res.msg);
     }
@@ -349,7 +342,7 @@ public class NaturalFTP
     public async Task Rename(string oldname, string newname)
     {
         if (!Connected) throw new FtpException("not connected");
-        timer.Stop();
+        timer?.Change(-1, -1);
         await sendCmd("RNFR " + oldname);
         var res = await recvCode();
         if (res.code != 350) throw new FtpException("invalid reply");
@@ -392,7 +385,7 @@ public class NaturalFTP
             }
             catch (Exception ex)
             {
-
+                throw new FtpException(ex.Message);
             }
         }
         else
@@ -432,7 +425,7 @@ public class NaturalFTP
         catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
         {
             Connected = false;
-            timer.Stop();
+            timer?.Change(-1, -1);
             throw;
         }
 
@@ -450,7 +443,7 @@ public class NaturalFTP
         catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
         {
             Connected = false;
-            timer.Stop();
+            timer?.Change(-1, -1);
             throw;
         }
     }
@@ -483,7 +476,7 @@ public class NaturalFTP
             catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
             {
                 Connected = false;
-                timer.Stop();
+                timer?.Change(-1, -1);
                 throw;
             }
             catch
@@ -496,7 +489,7 @@ public class NaturalFTP
             if (cnt == 0)
             {
                 Connected = false;
-                timer.Stop();
+                timer?.Change(-1, -1);
                 throw new SocketException((int)SocketError.ConnectionAborted);
             }
 
